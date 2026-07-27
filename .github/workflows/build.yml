@@ -1,4 +1,4 @@
-name: Build & Release
+name: 构建与发布
 
 on:
   push:
@@ -40,19 +40,19 @@ jobs:
 
     steps:
       # ── 1. 检出代码 ──
-      - name: Checkout
+      - name: 检出代码
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       # ── 2. 配置 Python 3.12.9 ──
-      - name: Setup Python
+      - name: 配置 Python 3.12.9
         uses: actions/setup-python@v5
         with:
           python-version: "3.12.9"
 
       # ── 3. 安装依赖 ──
-      - name: Install dependencies
+      - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
@@ -65,16 +65,16 @@ jobs:
       #   - "v" + 纯数字版本     → release     (正式发布)
       #   - 其他                → build       (仅构建)
       # ─────────────────────────────────────────────────────────
-      - name: Classify build type
+      - name: 判定构建类型
         id: classify
         shell: bash
         run: |
-          # ── 获取提交信息 ──
+          # 获取提交信息
           COMMIT_MSG="$(git log -1 --pretty=%B)"
           FIRST_LINE="$(echo "$COMMIT_MSG" | head -1)"
-          echo "[DEBUG] 提交信息: $FIRST_LINE"
+          echo "[信息] 提交信息: $FIRST_LINE"
 
-          # ── 手动触发时使用指定类型 ──
+          # 手动触发时使用指定类型
           MANUAL_TYPE="${{ inputs.build_type }}"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "$MANUAL_TYPE" != "auto" ]; then
             BT="$MANUAL_TYPE"
@@ -97,7 +97,7 @@ jobs:
             exit 0
           fi
 
-          # ── 规则1: "Pass" 前缀（不区分大小写）→ 跳过编译 ──
+          # 规则1: "Pass" 前缀（不区分大小写）→ 跳过编译
           if echo "$FIRST_LINE" | grep -qiE '^pass'; then
             echo "::notice::提交以 'Pass' 开头 → 跳过编译"
             echo "build_type=skip" >> $GITHUB_OUTPUT
@@ -109,8 +109,8 @@ jobs:
             exit 0
           fi
 
-          # ── 规则2/3: "v" 前缀 → 解析版本 ──
-          # 匹配: v<major>[.<minor>[.<patch>]][-Alpha|Beta<N>]  全部不区分大小写
+          # 规则2/3: "v" 前缀 → 解析版本
+          # 匹配: v<主版本>[.<次版本>[.<补丁版本>]][-Alpha|Beta<N>]  全部不区分大小写
           if echo "$FIRST_LINE" | grep -qiE '^v[0-9]+'; then
             # 提取版本号: v1.2.3 → 1.2.3, v1 → 1.0.0
             MAJOR=$(echo "$FIRST_LINE" | sed -nE 's/^[vV]([0-9]+).*/\1/p')
@@ -123,7 +123,7 @@ jobs:
 
             # 检查是否包含 Beta 或 Alpha（不区分大小写）
             if echo "$FIRST_LINE" | grep -qiE '(beta|alpha)'; then
-              # ── 预发布 ──
+              # 预发布
               PRE_TAG=$(echo "$FIRST_LINE" | sed -nE 's/.*[\.\-]?(Alpha|Beta)[\.\-]?([0-9]*).*/\1\2/pI')
               PRE_TAG="${PRE_TAG:-Beta}"
               echo "::notice::预发布版本: v${VERSION}-${PRE_TAG}"
@@ -132,7 +132,7 @@ jobs:
               echo "is_prerelease=true" >> $GITHUB_OUTPUT
               ARTIFACT="RoboCopy-GUI-v${VERSION}-${PRE_TAG}"
             else
-              # ── 正式发布 ──
+              # 正式发布
               echo "::notice::正式发布版本: v${VERSION}"
               echo "build_type=release" >> $GITHUB_OUTPUT
               echo "is_release=true" >> $GITHUB_OUTPUT
@@ -145,7 +145,7 @@ jobs:
             echo "prerelease_tag=${PRE_TAG}" >> $GITHUB_OUTPUT
             echo "artifact_name=${ARTIFACT}" >> $GITHUB_OUTPUT
           else
-            # ── 规则4: 其他 → 仅构建 ──
+            # 规则4: 其他 → 仅构建
             SHORT_HASH="$(git rev-parse --short HEAD)"
             echo "::notice::非版本提交 → 仅构建 (${SHORT_HASH})"
             echo "build_type=build" >> $GITHUB_OUTPUT
@@ -156,27 +156,23 @@ jobs:
             echo "artifact_name=RoboCopy-GUI-${SHORT_HASH}" >> $GITHUB_OUTPUT
           fi
 
-      # ── 5. 跳过时提前退出 ──
-      - name: Skip build
-        if: steps.classify.outputs.build_type == 'skip'
-        run: echo "::notice::编译已跳过。"
-
-      # ── 6. Nuitka 编译 ──
-      - name: Nuitka build
+      # ── 5. Nuitka 编译 ──
+      - name: Nuitka 编译
         if: steps.classify.outputs.build_type != 'skip'
         shell: bash
         run: |
           ARTIFACT="${{ steps.classify.outputs.artifact_name }}"
-          echo "[BUILD] 产物名称: ${ARTIFACT}"
+          echo "[信息] 产物名称: ${ARTIFACT}"
 
           # 清理旧产物
           rm -rf dist build release
           mkdir -p release
 
-          # Nuitka 编译 (standalone + MSVC)
+          # Nuitka 编译 (standalone 模式 + MSVC)
           python -m nuitka \
             --standalone \
             --msvc=latest \
+            --assume-yes-for-downloads \
             --enable-plugin=pyside6 \
             --windows-console-mode=disable \
             --include-package=qfluentwidgets \
@@ -188,24 +184,24 @@ jobs:
             --output-filename="${ARTIFACT}.exe" \
             robocopy-gui.py
 
-          # dist 文件夹路径
+          # dist 产物目录
           DIST_DIR="./build/${ARTIFACT}.dist"
-          echo "[BUILD] dist 目录: ${DIST_DIR}"
+          echo "[信息] 产物目录: ${DIST_DIR}"
           ls -lh "${DIST_DIR}/${ARTIFACT}.exe"
 
-          # 打包为 zip 用于上传
+          # 打包为 zip 用于分发
           cp -r "${DIST_DIR}" "./release/${ARTIFACT}"
           7z a "./release/${ARTIFACT}.zip" "./release/${ARTIFACT}/*" -r
 
           # 同时单独放 exe 方便直接下载
           cp "${DIST_DIR}/${ARTIFACT}.exe" "release/"
 
-          echo "[OK] Nuitka 编译完成"
-          echo "[OK] release/${ARTIFACT}.exe"
-          echo "[OK] release/${ARTIFACT}.zip"
+          echo "[完成] Nuitka 编译完成"
+          echo "[完成] release/${ARTIFACT}.exe"
+          echo "[完成] release/${ARTIFACT}.zip"
 
-      # ── 7. 上传产物 ──
-      - name: Upload artifact
+      # ── 6. 上传产物 ──
+      - name: 上传产物
         if: steps.classify.outputs.build_type != 'skip'
         uses: actions/upload-artifact@v4
         with:
@@ -215,8 +211,8 @@ jobs:
             release/*.zip
           retention-days: 30
 
-      # ── 8. 创建 GitHub Release（v 前缀提交） ──
-      - name: Create Release
+      # ── 7. 创建发布（v 前缀提交） ──
+      - name: 创建发布
         if: |
           (steps.classify.outputs.build_type == 'release' ||
            steps.classify.outputs.build_type == 'prerelease')

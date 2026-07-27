@@ -184,8 +184,8 @@ jobs:
             --output-filename="${ARTIFACT}.exe" \
             robocopy-gui.py
 
-          # dist 产物目录
-          DIST_DIR="./build/${ARTIFACT}.dist"
+          # dist 目录名由入口脚本决定，即 robocopy-gui.dist
+          DIST_DIR="./build/robocopy-gui.dist"
           echo "[信息] 产物目录: ${DIST_DIR}"
           ls -lh "${DIST_DIR}/${ARTIFACT}.exe"
 

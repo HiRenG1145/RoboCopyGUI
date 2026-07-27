@@ -1,0 +1,218 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [master, main]
+    paths-ignore:
+      - "**.md"
+      - ".gitignore"
+      - ".gitattributes"
+      - "LICENSE.txt"
+      - ".vscode/**"
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "构建类型"
+        required: true
+        type: choice
+        default: "auto"
+        options:
+          - auto
+          - build
+          - release
+          - prerelease
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    outputs:
+      build_type: ${{ steps.classify.outputs.build_type }}
+      version: ${{ steps.classify.outputs.version }}
+      is_release: ${{ steps.classify.outputs.is_release }}
+      is_prerelease: ${{ steps.classify.outputs.is_prerelease }}
+      prerelease_tag: ${{ steps.classify.outputs.prerelease_tag }}
+      artifact_name: ${{ steps.classify.outputs.artifact_name }}
+
+    steps:
+      # ── 1. 检出代码 ──
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── 2. 配置 Python ──
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # ── 3. 安装依赖 ──
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      # ── 4. 判定构建类型 ──────────────────────────────────────
+      #  规则（不区分大小写）：
+      #   - "Pass" 前缀         → skip        (跳过编译)
+      #   - "v" + "Beta/Alpha"  → prerelease  (预发布)
+      #   - "v" + 纯数字版本     → release     (正式发布)
+      #   - 其他                → build       (仅构建)
+      # ─────────────────────────────────────────────────────────
+      - name: Classify build type
+        id: classify
+        shell: bash
+        run: |
+          # ── 获取提交信息 ──
+          COMMIT_MSG="$(git log -1 --pretty=%B)"
+          FIRST_LINE="$(echo "$COMMIT_MSG" | head -1)"
+          echo "[DEBUG] 提交信息: $FIRST_LINE"
+
+          # ── 手动触发时使用指定类型 ──
+          MANUAL_TYPE="${{ inputs.build_type }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "$MANUAL_TYPE" != "auto" ]; then
+            BT="$MANUAL_TYPE"
+            VER="0.0.0"
+            PRE_TAG=""
+            IS_REL="false"
+            IS_PRE="false"
+            case "$BT" in
+              skip)       echo "::notice::手动触发 — 跳过编译" ;;
+              build)      echo "::notice::手动触发 — 仅构建" ;;
+              release)    IS_REL="true" ;&
+              prerelease) IS_PRE="true" ;;
+            esac
+            echo "build_type=$BT" >> $GITHUB_OUTPUT
+            echo "version=$VER" >> $GITHUB_OUTPUT
+            echo "is_release=$IS_REL" >> $GITHUB_OUTPUT
+            echo "is_prerelease=$IS_PRE" >> $GITHUB_OUTPUT
+            echo "prerelease_tag=$PRE_TAG" >> $GITHUB_OUTPUT
+            echo "artifact_name=RoboCopy-GUI-$BT" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # ── 规则1: "Pass" 前缀（不区分大小写）→ 跳过编译 ──
+          if echo "$FIRST_LINE" | grep -qiE '^pass'; then
+            echo "::notice::提交以 'Pass' 开头 → 跳过编译"
+            echo "build_type=skip" >> $GITHUB_OUTPUT
+            echo "version=0.0.0" >> $GITHUB_OUTPUT
+            echo "is_release=false" >> $GITHUB_OUTPUT
+            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+            echo "prerelease_tag=" >> $GITHUB_OUTPUT
+            echo "artifact_name=skip" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # ── 规则2/3: "v" 前缀 → 解析版本 ──
+          # 匹配: v<major>[.<minor>[.<patch>]][-Alpha|Beta<N>]  全部不区分大小写
+          if echo "$FIRST_LINE" | grep -qiE '^v[0-9]+'; then
+            # 提取版本号: v1.2.3 → 1.2.3, v1 → 1.0.0
+            MAJOR=$(echo "$FIRST_LINE" | sed -nE 's/^[vV]([0-9]+).*/\1/p')
+            MINOR=$(echo "$FIRST_LINE" | sed -nE 's/^[vV][0-9]+\.([0-9]+).*/\1/p')
+            PATCH=$(echo "$FIRST_LINE" | sed -nE 's/^[vV][0-9]+\.[0-9]+\.([0-9]+).*/\1/p')
+            MAJOR="${MAJOR:-0}"
+            MINOR="${MINOR:-0}"
+            PATCH="${PATCH:-0}"
+            VERSION="${MAJOR}.${MINOR}.${PATCH}"
+
+            # 检查是否包含 Beta 或 Alpha（不区分大小写）
+            if echo "$FIRST_LINE" | grep -qiE '(beta|alpha)'; then
+              # ── 预发布 ──
+              PRE_TAG=$(echo "$FIRST_LINE" | sed -nE 's/.*[\.\-]?(Alpha|Beta)[\.\-]?([0-9]*).*/\1\2/pI')
+              PRE_TAG="${PRE_TAG:-Beta}"
+              echo "::notice::预发布版本: v${VERSION}-${PRE_TAG}"
+              echo "build_type=prerelease" >> $GITHUB_OUTPUT
+              echo "is_release=false" >> $GITHUB_OUTPUT
+              echo "is_prerelease=true" >> $GITHUB_OUTPUT
+              ARTIFACT="RoboCopy-GUI-v${VERSION}-${PRE_TAG}"
+            else
+              # ── 正式发布 ──
+              echo "::notice::正式发布版本: v${VERSION}"
+              echo "build_type=release" >> $GITHUB_OUTPUT
+              echo "is_release=true" >> $GITHUB_OUTPUT
+              echo "is_prerelease=false" >> $GITHUB_OUTPUT
+              PRE_TAG=""
+              ARTIFACT="RoboCopy-GUI-v${VERSION}"
+            fi
+
+            echo "version=${VERSION}" >> $GITHUB_OUTPUT
+            echo "prerelease_tag=${PRE_TAG}" >> $GITHUB_OUTPUT
+            echo "artifact_name=${ARTIFACT}" >> $GITHUB_OUTPUT
+          else
+            # ── 规则4: 其他 → 仅构建 ──
+            SHORT_HASH="$(git rev-parse --short HEAD)"
+            echo "::notice::非版本提交 → 仅构建 (${SHORT_HASH})"
+            echo "build_type=build" >> $GITHUB_OUTPUT
+            echo "version=0.0.0" >> $GITHUB_OUTPUT
+            echo "is_release=false" >> $GITHUB_OUTPUT
+            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+            echo "prerelease_tag=" >> $GITHUB_OUTPUT
+            echo "artifact_name=RoboCopy-GUI-${SHORT_HASH}" >> $GITHUB_OUTPUT
+          fi
+
+      # ── 5. 跳过时提前退出 ──
+      - name: Skip build
+        if: steps.classify.outputs.build_type == 'skip'
+        run: echo "::notice::编译已跳过。"
+
+      # ── 6. PyInstaller 打包 ──
+      - name: PyInstaller build
+        if: steps.classify.outputs.build_type != 'skip'
+        shell: bash
+        run: |
+          ARTIFACT="${{ steps.classify.outputs.artifact_name }}"
+          echo "[BUILD] 产物名称: ${ARTIFACT}"
+
+          # 清理旧产物
+          rm -rf dist build release
+          mkdir -p release
+
+          # PyInstaller 打包
+          python -m PyInstaller \
+            --onefile \
+            --windowed \
+            --name="${ARTIFACT}" \
+            --distpath=./dist \
+            --workpath=./build \
+            --specpath=./build \
+            --hidden-import=PySide6.QtCore \
+            --hidden-import=PySide6.QtGui \
+            --hidden-import=PySide6.QtWidgets \
+            --hidden-import=qfluentwidgets \
+            --hidden-import=loguru \
+            robocopy-gui.py
+
+          # 拷贝产物到 release/
+          cp "dist/${ARTIFACT}.exe" release/
+
+          # 输出文件大小
+          ls -lh "release/${ARTIFACT}.exe"
+          echo "[OK] 打包完成: release/${ARTIFACT}.exe"
+
+      # ── 7. 上传产物 ──
+      - name: Upload artifact
+        if: steps.classify.outputs.build_type != 'skip'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.classify.outputs.artifact_name }}
+          path: release/*.exe
+          retention-days: 30
+
+      # ── 8. 创建 GitHub Release（v 前缀提交） ──
+      - name: Create Release
+        if: |
+          (steps.classify.outputs.build_type == 'release' ||
+           steps.classify.outputs.build_type == 'prerelease')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.classify.outputs.version }}
+          name: "RoboCopy-GUI v${{ steps.classify.outputs.version }}${{ steps.classify.outputs.prerelease_tag || '' }}"
+          prerelease: ${{ steps.classify.outputs.is_prerelease || 'false' }}
+          files: release/*.exe
+          generate_release_notes: true

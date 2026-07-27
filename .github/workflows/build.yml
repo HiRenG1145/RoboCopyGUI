@@ -28,7 +28,7 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     outputs:
       build_type: ${{ steps.classify.outputs.build_type }}
@@ -45,18 +45,18 @@ jobs:
         with:
           fetch-depth: 0
 
-      # ── 2. 配置 Python ──
+      # ── 2. 配置 Python 3.12.9 ──
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.12.9"
 
       # ── 3. 安装依赖 ──
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller
+          pip install nuitka ordered-set zstandard
 
       # ── 4. 判定构建类型 ──────────────────────────────────────
       #  规则（不区分大小写）：
@@ -161,8 +161,8 @@ jobs:
         if: steps.classify.outputs.build_type == 'skip'
         run: echo "::notice::编译已跳过。"
 
-      # ── 6. PyInstaller 打包 ──
-      - name: PyInstaller build
+      # ── 6. Nuitka 编译 ──
+      - name: Nuitka build
         if: steps.classify.outputs.build_type != 'skip'
         shell: bash
         run: |
@@ -173,27 +173,36 @@ jobs:
           rm -rf dist build release
           mkdir -p release
 
-          # PyInstaller 打包
-          python -m PyInstaller \
-            --onefile \
-            --windowed \
-            --name="${ARTIFACT}" \
-            --distpath=./dist \
-            --workpath=./build \
-            --specpath=./build \
-            --hidden-import=PySide6.QtCore \
-            --hidden-import=PySide6.QtGui \
-            --hidden-import=PySide6.QtWidgets \
-            --hidden-import=qfluentwidgets \
-            --hidden-import=loguru \
+          # Nuitka 编译 (standalone + MSVC)
+          python -m nuitka \
+            --standalone \
+            --msvc=latest \
+            --enable-plugin=pyside6 \
+            --windows-console-mode=disable \
+            --include-package=qfluentwidgets \
+            --include-package=loguru \
+            --include-package=Core \
+            --include-package=Views \
+            --include-package=Widgets \
+            --output-dir=./build \
+            --output-filename="${ARTIFACT}.exe" \
             robocopy-gui.py
 
-          # 拷贝产物到 release/
-          cp "dist/${ARTIFACT}.exe" release/
+          # dist 文件夹路径
+          DIST_DIR="./build/${ARTIFACT}.dist"
+          echo "[BUILD] dist 目录: ${DIST_DIR}"
+          ls -lh "${DIST_DIR}/${ARTIFACT}.exe"
 
-          # 输出文件大小
-          ls -lh "release/${ARTIFACT}.exe"
-          echo "[OK] 打包完成: release/${ARTIFACT}.exe"
+          # 打包为 zip 用于上传
+          cp -r "${DIST_DIR}" "./release/${ARTIFACT}"
+          7z a "./release/${ARTIFACT}.zip" "./release/${ARTIFACT}/*" -r
+
+          # 同时单独放 exe 方便直接下载
+          cp "${DIST_DIR}/${ARTIFACT}.exe" "release/"
+
+          echo "[OK] Nuitka 编译完成"
+          echo "[OK] release/${ARTIFACT}.exe"
+          echo "[OK] release/${ARTIFACT}.zip"
 
       # ── 7. 上传产物 ──
       - name: Upload artifact
@@ -201,7 +210,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.classify.outputs.artifact_name }}
-          path: release/*.exe
+          path: |
+            release/*.exe
+            release/*.zip
           retention-days: 30
 
       # ── 8. 创建 GitHub Release（v 前缀提交） ──
@@ -214,5 +225,7 @@ jobs:
           tag_name: v${{ steps.classify.outputs.version }}
           name: "RoboCopy-GUI v${{ steps.classify.outputs.version }}${{ steps.classify.outputs.prerelease_tag || '' }}"
           prerelease: ${{ steps.classify.outputs.is_prerelease || 'false' }}
-          files: release/*.exe
+          files: |
+            release/*.exe
+            release/*.zip
           generate_release_notes: true
